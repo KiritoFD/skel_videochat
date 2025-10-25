@@ -1,0 +1,21 @@
+# 忽略图片和视频文件
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.gif
+*.tif
+*.tiff
+*.avi
+*.mov
+*.mkv
+*.webm
+*.flv
+*.wmv
+*.mpg
+*.mpeg
+*.3gp
+*.ogg
+*.heic
+*.apng
+*.ico

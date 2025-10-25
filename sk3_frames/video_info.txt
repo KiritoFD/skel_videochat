@@ -1,0 +1,6 @@
+fps=30.000000000000107
+width=1024
+height=576
+total_frames=179
+source_image=1.jpg
+csv_file=short.csv
