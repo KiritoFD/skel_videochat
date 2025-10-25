@@ -1,8 +1,14 @@
 import os
 import cv2
 import numpy as np
-import mediapipe as mp
 import json
+
+try:
+    import mediapipe as mp
+    MEDIAPIPE_AVAILABLE = True
+except ImportError:
+    mp = None
+    MEDIAPIPE_AVAILABLE = False
 
 def ensure_debug_dir(args):
     debug_dir = os.path.join(os.path.dirname(args.output), "debug_frames")
@@ -86,6 +92,12 @@ def print_mediapipe_keypoint_diff(frame_img, csv_kps, warp_target, log_data, fra
     使用 MediaPipe 检测当前帧关键点并与 CSV 关键点逐点比较并保存差异到日志。
     支持 'pose' 和 'face' 两种类型。
     """
+    if not MEDIAPIPE_AVAILABLE:
+        if str(frame_idx) not in log_data:
+            log_data[str(frame_idx)] = {}
+        log_data[str(frame_idx)]["error"] = "MediaPipe未安装"
+        return
+    
     if warp_target == 'pose':
         mp_pose = mp.solutions.pose
         with mp_pose.Pose(static_image_mode=True) as pose:

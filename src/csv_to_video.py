@@ -4,7 +4,9 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
+import threading
 import os
+from collections import deque
 from args import parse_args
 from debug_utils import (
     print_mediapipe_keypoint_diff,
@@ -62,6 +64,7 @@ def warp_face_triangles(src_img, src_pts, tgt_pts, triangles):
     """
     使用三角形变形：对每个三角形内的所有像素做仿射变换。
     """
+    # CPU版本（原有代码）- 保证颜色正确
     h, w = src_img.shape[:2]
     warped = src_img.copy()
     mask_accum = np.zeros((h, w), dtype=np.uint8)
@@ -70,37 +73,27 @@ def warp_face_triangles(src_img, src_pts, tgt_pts, triangles):
         src_tri = np.asarray(src_pts[tri], dtype=np.float32)
         tgt_tri = np.asarray(tgt_pts[tri], dtype=np.float32)
 
-        # 检查是否有 NaN
         if np.isnan(src_tri).any() or np.isnan(tgt_tri).any():
             continue
 
-        # 计算仿射变换矩阵
         M = cv2.getAffineTransform(src_tri, tgt_tri)
-
-        # 目标三角形的包围盒
         x, y, ww, hh = cv2.boundingRect(tgt_tri)
         if ww <= 0 or hh <= 0:
             continue
 
-        # 构造目标三角形区域的掩码
         tgt_tri_roi = (tgt_tri - [x, y]).astype(np.int32)
         mask = np.zeros((hh, ww), dtype=np.uint8)
         cv2.fillConvexPoly(mask, tgt_tri_roi, 255)
 
-        # 对整个源图像进行仿射变换
         warped_full = cv2.warpAffine(src_img, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
-
-        # 将变形后的三角形区域复制到结果图像
         roi_src = warped_full[y:y+hh, x:x+ww]
         roi_dst = warped[y:y+hh, x:x+ww]
         roi_dst[mask > 0] = roi_src[mask > 0]
         warped[y:y+hh, x:x+ww] = roi_dst
-
-        # 标记已覆盖区域
         mask_accum[y:y+hh, x:x+ww][mask > 0] = 255
 
-    # 未覆盖区域保持原图
     warped[mask_accum == 0] = src_img[mask_accum == 0]
+    
     return warped
 
 def warp_with_scale(image, src_kps, tgt_kps, warp_target='face', triangles=None):
@@ -133,34 +126,59 @@ def compute_frame_diff(src_img, warped_img):
     max_diff = np.max(diff)
     return {"mean_diff": float(mean_diff), "max_diff": float(max_diff)}
 
-def generate_frame(idx, tgt_kps, src_img, src_kps, args, triangles=None, log_data=None):
-    """生成变形帧"""
+def generate_frame(idx, tgt_kps, src_img, src_kps, args, triangles=None, log_data=None, log_lock=None):
+    """生成变形帧（线程安全版本）"""
     if idx == 0:
-        if log_data is not None:
-            log_data[str(idx)] = {
-                "frame_id": idx,
-                "diff": {"mean_diff": 0.0, "max_diff": 0.0},
-                "keypoint_points": []
-            }
+        if log_data is not None and log_lock is not None:
+            with log_lock:
+                log_data[str(idx)] = {
+                    "frame_id": idx,
+                    "diff": {"mean_diff": 0.0, "max_diff": 0.0},
+                    "keypoint_points": []
+                }
         return idx, src_img.copy()
 
     frame = warp_with_scale(src_img, src_kps, tgt_kps, args.warp_target, triangles)
 
-    # 计算diff
-    if log_data is not None:
+    # 计算diff（线程安全的日志更新）
+    if log_data is not None and log_lock is not None:
         diff_info = compute_frame_diff(src_img, frame)
-        log_data[str(idx)] = {
-            "frame_id": idx,
-            "diff": diff_info
-        }
-        
-        # 只在每 10 帧时调用 MediaPipe 检测关键点差异
-        if idx % 10 == 0:
-            print(f"\n=== 帧 {idx} ===")
-            print(f"图像变形差异 - 平均: {diff_info['mean_diff']:.2f}, 最大: {diff_info['max_diff']:.2f}")
-            print_mediapipe_keypoint_diff(frame, tgt_kps, args.warp_target, log_data, idx)
+        with log_lock:
+            log_data[str(idx)] = {
+                "frame_id": idx,
+                "diff": diff_info
+            }
+            
+            # 只在每 10 帧时调用 MediaPipe 检测关键点差异
+            if idx % 10 == 0:
+                print(f"\n=== 帧 {idx} ===")
+                print(f"图像变形差异 - 平均: {diff_info['mean_diff']:.2f}, 最大: {diff_info['max_diff']:.2f}")
+                print_mediapipe_keypoint_diff(frame, tgt_kps, args.warp_target, log_data, idx)
 
     return idx, frame
+
+def generate_frame_batch(indices, batch_tgt_kps, src_img, src_kps, args, triangles, log_data_list):
+    """批量生成帧 - 直接使用原有的单帧处理逻辑"""
+    result = []
+    
+    for idx, tgt_kps in zip(indices, batch_tgt_kps):
+        if idx == 0:
+            log_data_list.append((str(idx), {
+                "frame_id": idx,
+                "diff": {"mean_diff": 0.0, "max_diff": 0.0}
+            }))
+            result.append((idx, src_img.copy()))
+        else:
+            # 直接使用原有的单帧处理函数，保证颜色处理完全一致
+            frame = warp_with_scale(src_img, src_kps, tgt_kps, args.warp_target, triangles)
+            diff_info = compute_frame_diff(src_img, frame)
+            log_data_list.append((str(idx), {
+                "frame_id": idx,
+                "diff": diff_info
+            }))
+            result.append((idx, frame))
+    
+    return result
 
 def evaluate_generated_frames(output_dir, n_frames):
     """评估生成的帧，统计生成的帧数量和文件大小"""
@@ -192,18 +210,73 @@ def main():
 
     # 初始化调试日志
     log_data = {}
+    exceptions = []
+    exception_lock = threading.Lock()
+    
+    total_frames = len(filled_kps)
+    batch_size = 10  # 一次生成 4 帧（利用 4GB 显存）
+    
+    # 第一步：批量生成帧
+    print("\n🚀 阶段 1: 批量生成帧到内存（批大小=%d）..." % batch_size)
+    frames_data = {}
+    log_data_batch = []
+    
+    gen_pbar = tqdm(total=total_frames, desc="生成帧")
+    for batch_start in range(0, total_frames, batch_size):
+        batch_end = min(batch_start + batch_size, total_frames)
+        batch_indices = list(range(batch_start, batch_end))
+        batch_kps = [filled_kps[i] for i in batch_indices]
+        
+        try:
+            batch_result = generate_frame_batch(
+                batch_indices, batch_kps, src_img, src_kps, args, triangles, log_data_batch
+            )
+            for idx, frame in batch_result:
+                frames_data[idx] = frame
+        except Exception as e:
+            with exception_lock:
+                exceptions.append(f"批生成 {batch_start}-{batch_end} 异常: {str(e)}")
+        
+        gen_pbar.update(batch_end - batch_start)
+    gen_pbar.close()
+    
+    # 合并日志
+    for key, val in log_data_batch:
+        log_data[key] = val
+    
+    # 第二步：激进并行保存（最大 CPU 核心）
+    print("\n⚡ 阶段 2: 激进并行保存到磁盘...")
+    
+    def save_frame_optimized(idx):
+        if idx not in frames_data:
+            return
+        try:
+            frame_path = os.path.join(output_dir, f"frame_{idx:06d}.png")
+            cv2.imwrite(frame_path, frames_data[idx], [cv2.IMWRITE_PNG_COMPRESSION, 0])
+        except Exception as e:
+            with exception_lock:
+                exceptions.append(f"保存帧 {idx} 异常: {str(e)}")
+    
+    num_workers = os.cpu_count() or 16
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        list(tqdm(executor.map(save_frame_optimized, range(total_frames)), 
+                 total=total_frames, desc="保存帧"))
+    
+    # 第三步：清理内存
+    print("\n🧹 清理内存...")
+    frames_data.clear()
+    log_data_batch.clear()
+    if torch is not None and CUDA_AVAILABLE:
+        torch.cuda.empty_cache()
+    print("✅ 内存和显存已释放")
 
-    # 生成帧
-    for idx, tgt_kps in enumerate(filled_kps):
-        _, frame = generate_frame(idx, tgt_kps, src_img, src_kps, args, triangles, log_data)
-        frame_path = os.path.join(output_dir, f"frame_{idx:06d}.png")
-        cv2.imwrite(frame_path, frame)
+    if exceptions:
+        print("\n⚠️ 异常:")n⚠️ 异常:")
+        for exc in exceptions::
+            print(f"  - {exc}")
 
-    # 保存调试日志
     save_debug_log(log_data, args)
+    evaluate_generated_frames(output_dir, len(filled_kps))rated_frames(output_dir, len(filled_kps))
 
-    # 调用评估函数
-    evaluate_generated_frames(output_dir, len(filled_kps))
-
-if __name__ == '__main__':
+if __name__ == '__main__':__main__':
     main()

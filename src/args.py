@@ -3,8 +3,8 @@ import argparse
 def parse_args():
     parser = argparse.ArgumentParser(description='基于关键点变化的图像变形视频生成')
 
-    parser.add_argument('-s', '--source', help='源图像路径（图片或视频）',default='head.jpg')
-    parser.add_argument('-c', '--csv',  help='输入 CSV 文件路径（由 extract_keypoints.py 生成）',default='head.csv')
+    parser.add_argument('-s', '--source', help='源图像路径（图片或视频）',default='images/head.jpg')
+    parser.add_argument('-c', '--csv',  help='输入 CSV 文件路径（由 extract_keypoints.py 生成）',default='data/head.csv')
     parser.add_argument('-o', '--output', default='warped.mp4', help='输出视频文件路径，默认 warped.mp4')
 
     parser.add_argument('--width', type=int, help='输出视频宽度（默认使用源图像宽度）')
