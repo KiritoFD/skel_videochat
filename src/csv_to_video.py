@@ -16,6 +16,30 @@ from debug_utils import (
     save_debug_log,
 )
 
+# ============================== 学生实践项目扩展说明 ==============================
+# 变形算法核心思想（与 README 第 5 节一致的源码内嵌文档）：
+# 1. 使用首帧关键点构建 Delaunay 三角网格（稳定拓扑）：
+
+#    - build_face_triangles(src_kps)
+#    - 过滤 NaN，避免异常点破坏剖分
+# 2. 对每一帧的目标关键点集合 tgt_kps：
+#    - 遍历三角形 tri = (i,j,k)
+#    - 若 src_kps[tri] 或 tgt_kps[tri] 存在 NaN → 跳过该三角
+#    - 使用 cv2.getAffineTransform 通过 3 组对应点求仿射矩阵 M (2x3)
+#    - warpAffine 对整张源图做仿射，得到 warped_full
+#    - boundingRect(tgt_tri) → 得到局部 ROI，构造掩膜（仅覆盖三角内部像素）
+#    - 将 warped_full 中对应 ROI + mask 的像素拷贝到输出帧
+# 3. 背景与未覆盖区：
+#    - 输出帧初始为 src_img.copy()，未被任何三角遮罩覆盖处自动保持背景连续性
+# 4. 数值与鲁棒性：
+#    - 小面积或异常三角跳过
+#    - 缺失关键点通过 fill_missing_keypoints 线性插值
+# 5. 改进潜力（当前未实现但预留接口）：
+#    - mask 羽化（软融合）
+#    - Poisson / 多频段融合抑制硬边界
+#    - 光流辅助减小大位移失真
+# =============================================================================
+
 def infer_face_count(df):
     """检测CSV中face关键点数量（返回点数）"""
     max_i = -1
@@ -62,7 +86,28 @@ def build_face_triangles(points):
 
 def warp_face_triangles(src_img, src_pts, tgt_pts, triangles):
     """
-    使用三角形变形：对每个三角形内的所有像素做仿射变换。
+    基于三角网格的局部仿射形变。
+    参数:
+        src_img   : 模板图像 (H,W,3)
+        src_pts   : 首帧关键点坐标 [N,2]
+        tgt_pts   : 当前帧目标关键点坐标 [N,2]
+        triangles : 三角形索引数组 [M,3]，指向关键点下标
+    返回:
+        warped    : 当前帧合成结果
+    算法步骤（与 README 5.4 对应）:
+        for tri in triangles:
+            s_tri = src_pts[tri]; t_tri = tgt_pts[tri]
+            若存在 NaN 则 continue
+            M = cv2.getAffineTransform(s_tri, t_tri)  # 求仿射 2x3
+            warped_full = warpAffine(src_img, M)      # 全图仿射（实现简单）
+            rect = boundingRect(t_tri)
+            在 rect 范围内建立 mask（三角内部像素为1）
+            用 mask 在 warped 中替换对应 ROI 像素
+        未覆盖区域保留原 src_img 像素
+    设计取舍:
+        - 整图 warp 简化实现（牺牲部分性能），对分辨率较小视频成本可接受
+        - 可改为局部仿射采样提升效率（需手写插值与坐标映射）
+        - 硬掩膜可能出现边缘拼接痕迹，后续可融合改进
     """
     # CPU版本（原有代码）- 保证颜色正确
     h, w = src_img.shape[:2]
@@ -271,12 +316,12 @@ def main():
     print("✅ 内存和显存已释放")
 
     if exceptions:
-        print("\n⚠️ 异常:")n⚠️ 异常:")
-        for exc in exceptions::
+        print("\n⚠️ 异常:")
+        for exc in exceptions:
             print(f"  - {exc}")
 
     save_debug_log(log_data, args)
-    evaluate_generated_frames(output_dir, len(filled_kps))rated_frames(output_dir, len(filled_kps))
+    evaluate_generated_frames(output_dir, len(filled_kps))
 
-if __name__ == '__main__':__main__':
+if __name__ == '__main__':
     main()
